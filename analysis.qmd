@@ -1,0 +1,264 @@
+---
+title: "Disney Content Based Recommendation System"
+author: "KVP"
+code-fold: false
+toc: true
+format:
+  html:
+    code-fold: true
+    code-summary: "Show the code"
+    theme: zephyr
+editor: visual
+server: shiny
+---
+
+```{r setup, echo=FALSE, include=FALSE}
+library(shiny)
+library(tidyverse)
+library(ggpubr)
+library(plotly)
+library(qdapTools)
+library(janitor)
+library(cluster)
+library(factoextra)
+library(reactable)
+
+```
+
+# Load Data
+```{r load_data, include = TRUE}
+df_titles <- read_csv("./data/titles.csv", show_col_types = FALSE)
+
+glimpse(df_titles)
+```
+
+Looks like the `titles.csv` contains information on whether the item was a movie or show, age certification, genre, length, and various ratings. For this analysis we won't use the description and won't use the year because I do not think that will have a large impact on whether or not you would like to see a show or movie.
+
+# Exploratory Data Analysis
+
+Number of movies versus shows
+
+```{r}
+df_titles %>%
+  group_by(type) %>%
+  count()
+```
+
+```{r}
+df_titles %>%
+  group_by(release_year) %>%
+  count() %>%
+  arrange(release_year) %>%
+  ggplot(., aes(x = release_year, y = n)) + 
+  geom_point(color = "#294EB8") + geom_line(color = "#294EB8") + 
+  theme_pubclean() + xlab("Release Year") + ylab("Count") +
+  ggtitle("Number of Releases per Year")
+```
+
+```{r}
+df_titles %>%
+  group_by(release_year, type) %>%
+  count() %>%
+  arrange(release_year) %>%
+  ggplot(., aes(x = release_year, y = n, color = type)) + 
+  geom_point() + geom_line() + 
+  scale_color_manual(values = c("#294EB8", "#B82941")) + theme_pubclean() +
+  xlab("Release Year") + ylab("Count") +
+  ggtitle("Number of Releases per Year") + theme(legend.title= element_blank())
+```
+
+```{r}
+df_titles %>%
+  group_by(age_certification) %>%
+  count() 
+```
+
+```{r}
+ggdensity(df_titles, x = "runtime", color = "#294EB8", fill = "#294EB8") +
+  ggtitle("Runtime (Minutes)") + xlab("") + theme_pubclean()
+```
+
+```{r}
+ggdensity(df_titles, x = "runtime", color = "type", fill = "type",
+          palette = c("#294EB8", "#B82941")) +
+  ggtitle("Runtime (Minutes)") + xlab("") + theme_pubclean()
+```
+
+```{r}
+ggdensity(df_titles, x = "imdb_score", color = "#294EB8", fill = "#294EB8") +
+  ggtitle("IMDB Score") + xlab("") + theme_pubclean()
+```
+
+```{r}
+ggdensity(df_titles, x = "imdb_score", color = "type", fill = "type",
+          palette = c("#294EB8", "#B82941")) +
+  ggtitle("IMDB Score") + xlab("") + theme_pubclean()
+```
+
+```{r}
+temp <- str_remove_all(df_titles$genres, "\\[|\\]| |'") %>% str_split(., ",") %>%
+  unlist() %>% as.data.frame()
+
+colnames(temp) <- "genre"
+
+temp %>%
+  count(genre) %>%
+  arrange(desc(n))
+```
+
+# Data Cleaning
+
+Create one hot encodings for genre, type, age certification
+
+```{r}
+
+# one hot encode: genre, type, age certification
+genres <- str_remove_all(df_titles$genres, "\\[|\\]| |'") %>% str_split(., ",") %>%
+  mtabulate()
+types <-  mtabulate(df_titles$type)
+age_cert <-  mtabulate(df_titles$age_certification)
+
+# combine one hot encodings into single dataframe
+df_titles_clean <- cbind(df_titles, genres)
+df_titles_clean <- cbind(df_titles_clean, types)
+df_titles_clean <- cbind(df_titles_clean, age_cert)
+
+
+
+df_titles_clean <- df_titles_clean %>%
+  select(id, title, MOVIE, SHOW, G:`TV-Y7`, action:western, 
+         runtime, imdb_score) %>% 
+  clean_names()
+
+glimpse(df_titles_clean)
+```
+
+Scale the data
+
+```{r}
+df_titles_clean_scaled <- df_titles_clean %>%
+  select(movie:runtime) %>%
+  as.matrix() %>%
+  scale() %>%
+  as.data.frame()
+```
+
+# K Means Clustering
+
+Find the optimal number of clusters
+
+```{r}
+set.seed(123)
+
+fviz_nbclust(
+  df_titles_clean_scaled, 
+  kmeans, 
+  method = "wss", 
+  k.max = 30, 
+  verbose = FALSE
+)
+```
+
+Use the `cluster::daisy()` function to create a Gower distance matrix - a measure of dissimilarity where 0 = same and 1 = most dissimilar
+
+```{r}
+gower_dst <- daisy(df_titles_clean %>%
+  select(movie:runtime), metric = "gower")
+
+gower_dst_matrix <- gower_dst %>% as.matrix()
+
+row.names(gower_dst_matrix) <- df_titles_clean$id
+colnames(gower_dst_matrix) <- df_titles_clean$id
+
+
+# pam_gower <- pam(x = gower_dst, k = 8, diss = TRUE)
+# diana_gower <- diana(x = gower_dst, diss = TRUE)
+# agnes_gower <- agnes(x = gower_dst, diss = TRUE)
+```
+
+```{r}
+x <- as.data.frame(gower_dst_matrix, row.names= df_titles_clean$id)
+
+x <- x %>%
+  mutate(selected_id = rownames(x))
+
+
+x_long <- x %>%
+  pivot_longer(cols = -selected_id, names_to = "recommended_id",
+               values_to = "dissimilarity")
+
+# remove when selected_id == recommended_id
+x_long <- x_long %>%
+  filter(selected_id != recommended_id)
+
+# merge the selected title info 
+x_long <- merge(x_long, df_titles %>% select(id:title), 
+               by.x = "recommended_id", by.y = "id", all.x = TRUE)
+
+x_long <- x_long %>%
+  rename("selected_title" = "title")
+
+# merge the selected title info (name, description, year, rating, imdb score)
+x_long <- merge(x_long, df_titles %>% select(id:runtime,imdb_score), 
+               by.x = "selected_id", by.y = "id", all.x = TRUE)
+x_long <- x_long %>%
+  rename("recommended_title" = "title",
+         "recommended_type" = "type",
+         "recommended_description" = "description",
+         "recommended_release_year" = "release_year",
+         "recommended_age_certification" = "age_certification",
+         "recomended_runtime" = "runtime",
+         "recommended_imdb_score" = "imdb_score"
+         )
+dat <- x_long
+save(dat, file = "./data/recommender_results.RData")
+```
+
+# Create a Recommendation Table
+
+Create a table that recommends 10 titles based on your initial selection (something you liked).
+
+```{r data-chunk}
+#| context: setup
+load("./data/recommender_results.RData")
+```
+
+```{r, warning=FALSE}
+#| context: render
+selectInput(
+  "item_selector",
+  "Select a Movie or Show:",
+  unique(dat$selected_title) %>% sort()
+)
+reactableOutput("table")
+```
+
+
+
+```{r}
+#| context: server
+
+# selectedData <- reactive({
+#     dat %>% filter(selected_id == input$item_selector) %>%
+#                 arrange(dissimilarity) %>% slice(10) %>%
+#                 select(dissimilarity:recommended_imdb_score)
+#   })
+
+
+output$table <- renderReactable({
+
+    reactable(dat %>% filter(selected_title == input$item_selector) %>%
+                arrange(dissimilarity) %>% slice(1:10) %>%
+                select(recommended_title:recommended_imdb_score),
+              columns = list(
+                recommended_title = colDef(name = "Title", minWidth = 150),
+                recommended_type = colDef(name = "Type"),
+                recommended_release_year = colDef(name = "Year"),
+                recommended_age_certification = colDef(name = "Rating"),
+                recommended_description = colDef(name = "Description",
+                                                 minWidth = 400),
+                recomended_runtime = colDef(name = "Length (Min)"),
+                recommended_imdb_score = colDef(name = "IMDB Score")
+              ))
+  })
+```
